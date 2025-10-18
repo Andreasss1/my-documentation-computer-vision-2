@@ -1,0 +1,233 @@
+python:
+import cv2
+from ultralytics import YOLO
+import numpy as np
+import serial
+import time
+
+# Load the YOLO models
+model_roi = YOLO('ROI.pt')  # Model for detecting HP screen as ROI
+model_bubble = YOLO('bubble.pt')  # Model for detecting bubbles
+
+# Create CLAHE object
+clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(16, 16))
+
+# Setup serial communication with ESP32
+try:
+    ser = serial.Serial('COM3', 9600, timeout=1)
+    time.sleep(2)  # Wait for serial connection to initialize
+    print("Serial connection established on COM3")
+except Exception as e:
+    print(f"Error: Could not open serial port. {e}")
+    exit()
+
+# Open the camera
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("Error: Could not open camera.")
+    exit()
+
+# Variables for relay control timing
+relay_active = False
+relay_start_time = 0
+current_relay_mode = None
+
+while True:
+    # Read frame from camera
+    ret, frame = cap.read()
+    if not ret:
+        print("Error: Failed to capture frame.")
+        break
+    
+    # Convert frame to grayscale for CLAHE
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Apply CLAHE to grayscale
+    enhanced_gray = clahe.apply(gray)
+    
+    # Convert back to BGR (for consistency with original frame)
+    enhanced_frame = cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2BGR)
+    
+    # Detect ROI (HP screen) using the ROI model on enhanced frame
+    results_roi = model_roi(enhanced_frame)
+    
+    roi_detected = False
+    bubble_detected = False
+    
+    # Assume the ROI is the first detected object (class 0, adjust if needed)
+    for result in results_roi:
+        boxes = result.boxes
+        if len(boxes) > 0:
+            roi_detected = True
+            # Get the bounding box of the ROI (x1, y1, x2, y2)
+            box = boxes[0].xyxy[0].cpu().numpy()  # Take the first detection
+            x1, y1, x2, y2 = map(int, box)
+            
+            # Crop the enhanced frame to the ROI area
+            roi_crop = enhanced_frame[y1:y2, x1:x2]
+            
+            # If ROI is too small, skip
+            if roi_crop.shape[0] == 0 or roi_crop.shape[1] == 0:
+                continue
+            
+            # Detect bubbles in the ROI using the bubble model
+            results_bubble = model_bubble(roi_crop)
+            
+            # Draw bubble detections on the cropped ROI
+            for bubble_result in results_bubble:
+                bubble_boxes = bubble_result.boxes
+                if len(bubble_boxes) > 0:
+                    bubble_detected = True
+                    
+                for bb in bubble_boxes:
+                    bx1, by1, bx2, by2 = map(int, bb.xyxy[0].cpu().numpy())
+                    # Get class name
+                    class_id = int(bb.cls[0])
+                    class_name = bubble_result.names[class_id]
+                    
+                    # Draw rectangle on cropped ROI (green for bubbles)
+                    cv2.rectangle(roi_crop, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
+                    # Draw label
+                    cv2.putText(roi_crop, class_name, (bx1, by1 - 10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            
+            # Paste the modified ROI back into the enhanced frame
+            enhanced_frame[y1:y2, x1:x2] = roi_crop
+            
+            # Draw the ROI rectangle on the frame (red for ROI)
+            cv2.rectangle(enhanced_frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+            cv2.putText(enhanced_frame, "ROI Detected", (x1, y1 - 10),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+    
+    # Check if relay timer has expired (for 7-second relay activation)
+    if relay_active and (time.time() - relay_start_time >= 7):
+        ser.write(b'OFF\n')  # Turn off relays after 7 seconds
+        relay_active = False
+        current_relay_mode = None
+        print("Relays turned OFF after 7 seconds")
+    
+    # Control relays based on detection results (only if not currently in timed mode)
+    if not relay_active:
+        if roi_detected and bubble_detected:
+            # Case 1: Bubble detected in ROI - Activate relay pin 22 and 18 for 7 seconds
+            ser.write(b'BUBBLE\n')
+            relay_active = True
+            relay_start_time = time.time()
+            current_relay_mode = "BUBBLE"
+            print("Bubble detected! Activating relays on pin 22 and 18 for 7 seconds")
+            
+            # Display status on frame
+            cv2.putText(enhanced_frame, "BUBBLE DETECTED - Relay 22 & 18 ON", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            
+        elif roi_detected and not bubble_detected:
+            # Case 2: ROI detected but no bubble - Activate relay pin 21
+            if current_relay_mode != "ROI_ONLY":
+                ser.write(b'ROI_ONLY\n')
+                current_relay_mode = "ROI_ONLY"
+                print("ROI detected, no bubble. Activating relay on pin 21")
+            
+            # Display status on frame
+            cv2.putText(enhanced_frame, "ROI ONLY - Relay 21 ON", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+        elif not roi_detected:
+            # Case 3: No ROI detected - Activate relay pin 19
+            if current_relay_mode != "NO_ROI":
+                ser.write(b'NO_ROI\n')
+                current_relay_mode = "NO_ROI"
+                print("No ROI detected. Activating relay on pin 19")
+            
+            # Display status on frame
+            cv2.putText(enhanced_frame, "NO ROI - Relay 19 ON", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    else:
+        # Display countdown during timed relay activation
+        remaining_time = int(7 - (time.time() - relay_start_time))
+        cv2.putText(enhanced_frame, f"Relay Timer: {remaining_time}s", (10, 60),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+    
+    # Display the frame
+    cv2.imshow('Bubble Detection on HP Screen', enhanced_frame)
+    
+    # Break loop on 'q' key press
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Cleanup: Turn off all relays before exiting
+ser.write(b'OFF\n')
+time.sleep(0.5)
+
+# Release resources
+cap.release()
+cv2.destroyAllWindows()
+ser.close()
+print("Program terminated. All relays turned OFF.")
+
+esp32:
+// ESP32 Code untuk kontrol 4 relay berdasarkan perintah dari PC
+
+// Pin definitions untuk relay
+const int RELAY_PIN_22 = 22;  // Relay 1 - untuk bubble detected
+const int RELAY_PIN_18 = 18;  // Relay 2 - untuk bubble detected
+const int RELAY_PIN_21 = 21;  // Relay 3 - ROI only
+const int RELAY_PIN_19 = 19;  // Relay 4 - No ROI
+
+void setup() {
+  Serial.begin(9600);
+  
+  // Setup relay pins sebagai OUTPUT
+  pinMode(RELAY_PIN_22, OUTPUT);
+  pinMode(RELAY_PIN_18, OUTPUT);
+  pinMode(RELAY_PIN_21, OUTPUT);
+  pinMode(RELAY_PIN_19, OUTPUT);
+  
+  // Set semua relay OFF di awal (LOW = OFF untuk active HIGH relay)
+  // Ganti ke HIGH jika menggunakan active LOW relay
+  digitalWrite(RELAY_PIN_22, LOW);
+  digitalWrite(RELAY_PIN_18, LOW);
+  digitalWrite(RELAY_PIN_21, LOW);
+  digitalWrite(RELAY_PIN_19, LOW);
+  
+  Serial.println("ESP32 Relay Control Ready");
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    
+    if (command == "BUBBLE") {
+      // Aktivasi relay pin 22 dan 18 (untuk bubble detected)
+      digitalWrite(RELAY_PIN_22, HIGH);
+      digitalWrite(RELAY_PIN_18, HIGH);
+      digitalWrite(RELAY_PIN_21, LOW);
+      digitalWrite(RELAY_PIN_19, LOW);
+      Serial.println("Relay 22 & 18 ON - Bubble Detected");
+      
+    } else if (command == "ROI_ONLY") {
+      // Aktivasi relay pin 21 (ROI detected, no bubble)
+      digitalWrite(RELAY_PIN_22, LOW);
+      digitalWrite(RELAY_PIN_18, LOW);
+      digitalWrite(RELAY_PIN_21, HIGH);
+      digitalWrite(RELAY_PIN_19, LOW);
+      Serial.println("Relay 21 ON - ROI Only");
+      
+    } else if (command == "NO_ROI") {
+      // Aktivasi relay pin 19 (No ROI detected)
+      digitalWrite(RELAY_PIN_22, LOW);
+      digitalWrite(RELAY_PIN_18, LOW);
+      digitalWrite(RELAY_PIN_21, LOW);
+      digitalWrite(RELAY_PIN_19, HIGH);
+      Serial.println("Relay 19 ON - No ROI");
+      
+    } else if (command == "OFF") {
+      // Matikan semua relay
+      digitalWrite(RELAY_PIN_22, LOW);
+      digitalWrite(RELAY_PIN_18, LOW);
+      digitalWrite(RELAY_PIN_21, LOW);
+      digitalWrite(RELAY_PIN_19, LOW);
+      Serial.println("All Relays OFF");
+    }
+  }
+}

@@ -1,0 +1,266 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { Camera, Circle, AlertCircle } from 'lucide-react';
+
+const YOLODetectionDashboard = () => {
+  const [status, setStatus] = useState('Pass/Idle');
+  const [detectionCount, setDetectionCount] = useState(0);
+  const [detections, setDetections] = useState([]);
+  const [isConnected, setIsConnected] = useState(false);
+  const [consecutiveDetections, setConsecutiveDetections] = useState([]);
+  const imgRef = useRef(null);
+  const wsRef = useRef(null);
+
+  // WebSocket connection ke backend
+  useEffect(() => {
+    const BACKEND_URL = 'ws://localhost:5000';
+    
+    try {
+      const ws = new WebSocket(BACKEND_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('Connected to YOLO backend');
+        setIsConnected(true);
+        ws.send(JSON.stringify({ type: 'start_detection' }));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          // Handle detections data
+          if (Array.isArray(data)) {
+            processDetection(data);
+          }
+        } catch (error) {
+          console.error('Error parsing message:', error);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        setIsConnected(false);
+      };
+
+      ws.onclose = () => {
+        console.log('Disconnected from backend');
+        setIsConnected(false);
+      };
+
+      return () => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        }
+      };
+    } catch (error) {
+      console.error('Failed to connect to backend:', error);
+      setIsConnected(false);
+    }
+  }, []);
+
+  // Fungsi untuk memproses deteksi
+  const processDetection = (detectedObjects) => {
+    const relevantObjects = detectedObjects.filter(
+      obj => obj.class === 'Gelembung Standar' || obj.class === 'Gelembung Solid'
+    );
+
+    if (relevantObjects.length > 0) {
+      // Tambahkan ke array deteksi berurutan
+      const newConsecutive = [...consecutiveDetections, true].slice(-3);
+      setConsecutiveDetections(newConsecutive);
+      setDetectionCount(prev => prev + 1);
+
+      // Cek apakah sudah 3 kali berturut-turut
+      if (newConsecutive.length === 3 && newConsecutive.every(d => d === true)) {
+        setStatus('NG');
+      }
+
+      setDetections(relevantObjects);
+    } else {
+      // Reset jika tidak ada deteksi
+      setConsecutiveDetections([]);
+      setStatus('Pass/Idle');
+      setDetections([]);
+    }
+  };
+
+  const resetSystem = () => {
+    setStatus('Pass/Idle');
+    setDetectionCount(0);
+    setConsecutiveDetections([]);
+    setDetections([]);
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white p-6">
+      <div className="max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="mb-6">
+          <h1 className="text-3xl font-bold mb-2 flex items-center gap-3">
+            <Camera className="w-8 h-8" />
+            YOLO Object Detection System
+          </h1>
+          <p className="text-gray-400">Detection Model: ai-model.pt</p>
+        </div>
+
+        {/* Connection Alert */}
+        {!isConnected && (
+          <div className="mb-6 bg-red-900 border border-red-700 rounded-lg p-4">
+            <div className="flex items-center gap-3">
+              <AlertCircle className="w-6 h-6 text-red-400" />
+              <div>
+                <div className="font-semibold">Backend Not Connected</div>
+                <div className="text-sm text-red-300">
+                  Pastikan backend Python sudah berjalan di http://localhost:5000
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Video Feed */}
+          <div className="lg:col-span-2">
+            <div className="bg-gray-800 rounded-lg p-4">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-semibold">Camera Feed</h2>
+                <div className="flex items-center gap-2">
+                  <Circle 
+                    className={`w-3 h-3 ${isConnected ? 'fill-green-500 text-green-500' : 'fill-red-500 text-red-500'}`} 
+                  />
+                  <span className="text-sm text-gray-400">
+                    {isConnected ? 'Connected' : 'Disconnected'}
+                  </span>
+                </div>
+              </div>
+              
+              <div className="relative bg-black rounded-lg overflow-hidden">
+                {isConnected ? (
+                  <img
+                    ref={imgRef}
+                    src="http://localhost:5000/video_feed"
+                    alt="Live Camera Feed"
+                    className="w-full h-auto"
+                    onError={() => console.error('Failed to load video feed')}
+                  />
+                ) : (
+                  <div className="w-full h-96 flex items-center justify-center text-gray-500">
+                    <div className="text-center">
+                      <Camera className="w-16 h-16 mx-auto mb-4 opacity-50" />
+                      <p>Waiting for connection...</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Status Panel */}
+          <div className="lg:col-span-1 space-y-6">
+            {/* Status Indicator */}
+            <div className="bg-gray-800 rounded-lg p-6">
+              <h2 className="text-xl font-semibold mb-4">Status</h2>
+              <div 
+                className={`rounded-lg p-8 text-center transition-colors ${
+                  status === 'NG' ? 'bg-red-600' : 'bg-orange-500'
+                }`}
+              >
+                <div className="text-5xl font-bold mb-2">{status}</div>
+                {status === 'NG' && (
+                  <div className="flex items-center justify-center gap-2 text-sm">
+                    <AlertCircle className="w-4 h-4" />
+                    <span>Defect Detected</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Detection Info */}
+            <div className="bg-gray-800 rounded-lg p-6">
+              <h2 className="text-xl font-semibold mb-4">Detection Info</h2>
+              <div className="space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-400">Total Detections:</span>
+                  <span className="font-semibold text-lg">{detectionCount}</span>
+                </div>
+                <div className="flex justify-between items-center">
+                  <span className="text-gray-400">Consecutive:</span>
+                  <span className="font-semibold text-lg">{consecutiveDetections.length}/3</span>
+                </div>
+                <div className="mt-4">
+                  <div className="text-gray-400 text-sm mb-2">Progress:</div>
+                  <div className="flex gap-2">
+                    {[1, 2, 3].map((i) => (
+                      <div
+                        key={i}
+                        className={`flex-1 h-3 rounded transition-colors ${
+                          consecutiveDetections.length >= i
+                            ? 'bg-yellow-500'
+                            : 'bg-gray-700'
+                        }`}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Current Detections */}
+            <div className="bg-gray-800 rounded-lg p-6">
+              <h2 className="text-xl font-semibold mb-4">Current Detections</h2>
+              {detections.length > 0 ? (
+                <div className="space-y-2 max-h-60 overflow-y-auto">
+                  {detections.map((det, idx) => (
+                    <div key={idx} className="bg-gray-700 rounded p-3">
+                      <div className="font-semibold text-green-400">{det.class}</div>
+                      <div className="text-sm text-gray-400">
+                        Confidence: {(det.confidence * 100).toFixed(1)}%
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-gray-500 text-center py-4">
+                  No objects detected
+                </div>
+              )}
+            </div>
+
+            {/* Reset Button */}
+            <button
+              onClick={resetSystem}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-lg transition-colors"
+            >
+              Reset System
+            </button>
+          </div>
+        </div>
+
+        {/* Instructions */}
+        <div className="mt-6 bg-gray-800 rounded-lg p-6">
+          <h2 className="text-xl font-semibold mb-3">System Rules</h2>
+          <ul className="list-disc list-inside space-y-2 text-gray-300">
+            <li>Status awal: <strong className="text-orange-400">Pass/Idle</strong></li>
+            <li>Mendeteksi objek <strong>Gelembung Standar</strong> atau <strong>Gelembung Solid</strong></li>
+            <li>Status berubah menjadi <strong className="text-red-400">NG</strong> setelah 3 deteksi berurutan (bisa campur kedua objek)</li>
+            <li>Deteksi 1-2 kali tidak akan mengubah status</li>
+            <li>Jika tidak ada deteksi, sistem kembali ke <strong className="text-orange-400">Pass/Idle</strong></li>
+          </ul>
+        </div>
+
+        {/* Setup Instructions */}
+        <div className="mt-6 bg-blue-900 bg-opacity-30 border border-blue-700 rounded-lg p-6">
+          <h2 className="text-xl font-semibold mb-3 text-blue-300">Setup Instructions</h2>
+          <ol className="list-decimal list-inside space-y-2 text-gray-300">
+            <li>Install dependencies: <code className="bg-gray-800 px-2 py-1 rounded text-sm">pip install flask flask-socketio flask-cors ultralytics opencv-python</code></li>
+            <li>Pastikan file <code className="bg-gray-800 px-2 py-1 rounded text-sm">ai-model.pt</code> ada di folder yang sama</li>
+            <li>Jalankan backend: <code className="bg-gray-800 px-2 py-1 rounded text-sm">python app.py</code></li>
+            <li>Buka dashboard ini dan pastikan status Connected</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default YOLODetectionDashboard;
